@@ -7,12 +7,12 @@
 // Для воссоздания визуала Unveil положим базу зеркально: по X и Y значения
 // инвертированы, чтобы поезд уходил вверх‑вправо, а по Z оставляем
 // исходное значение (глубина сцены).  
-// Подгоняем положение и шаг, чтобы карточки были ближе к камере и друг к другу.
-// Эти значения подобраны экспериментально: база немного смещена ближе к центру
-// и к камере, а шаг уменьшен по длине (масштабирован ~0.6 от исходного), что
-// делает поезд компактным и визуально приближает первую карточку.
-const BASE = new THREE.Vector3(-2.37, -1.72, -20.0);
-const STEP = new THREE.Vector3(0.225, 0.163553, -0.43);
+// Подгоняем положение и шаг, чтобы карточки занимали примерно такую же
+// позицию как на оригинальном сайте. База перемещена вглубь сцены
+// (z ≈ −30), а шаг по z уменьшен по модулю (≈ −0.5). Знаки X/Y по‑прежнему
+// инвертированы, чтобы поезд поднимался вверх‑вправо.
+const BASE = new THREE.Vector3(-3.945000, -2.867638, -30.0);
+const STEP = new THREE.Vector3(0.375000, 0.272589, -0.50);
 // Поворот карточек оставляем без изменений: они смотрят прямо на камеру
 // (нет вращения вокруг оси Y), небольшие наклоны используются для
 // имитации перспективы.  
@@ -104,6 +104,17 @@ function loadEnvironment() {
 //// ===== GEOMETRY AND TEXTURE LOADERS =====
 const planeGeo  = new THREE.PlaneGeometry(1, 1);
 const texLoader = new THREE.TextureLoader();
+
+// Пастельные оттенки для тонировки стекла и размытия.
+// Цвет выбирается случайно для каждой карточки, придавая футуристичный
+// вид и разнообразие. Можно добавить больше оттенков при желании.
+const TINT_COLORS = [
+  new THREE.Color(0xfff9d0), // нежный жёлтый
+  new THREE.Color(0xd0f4ff), // нежный голубой
+  new THREE.Color(0xf0d0ff), // нежный фиолетовый
+  new THREE.Color(0xdff0ff), // светло‑голубой
+  new THREE.Color(0xffe0f0)  // светло‑розовый
+];
 
 function deriveBlurURL(url){
   const m = url && url.match(/^(.*)(\.[a-zA-Z0-9]+)$/);
@@ -253,19 +264,20 @@ const EDGE_ROUNDED   = multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024); // for 
 // Glass material: no transmission, with clearcoat & env bounces, thin bright rim
 function makeGlassMaterial() {
   return new THREE.MeshPhysicalMaterial({
+    // цвет задаётся позже для каждой карточки; по умолчанию белый
     color: 0xffffff,
     metalness: 0.0,
-    roughness: 0.05,           // A: small roughness for subtle highlight
-    clearcoat: 1.0,            // D
-    clearcoatRoughness: 0.03,  // D
-    transmission: 0.0,         // A: no screen-space blur
-    thickness: 0.0,
-    ior: 1.0,
+    roughness: 0.05,           // небольшая шероховатость для матовых бликов
+    clearcoat: 1.0,            // тонкий слой лака
+    clearcoatRoughness: 0.05,
+    transmission: 0.5,         // стеклянная прозрачность
+    thickness: 2.0,            // толщина стекла для красивых искажений
+    ior: 1.2,                  // показатель преломления
     transparent: true,
-    opacity: 0.12,             // A: central haze (0.10–0.14)
-    alphaMap: GLASS_MASK,      // A+E: thin bright rim w/ rounded corners
+    opacity: 0.7,              // картинка просвечивает
+    alphaMap: GLASS_MASK,      // ободок светлее
     depthWrite: false,
-    envMapIntensity: 1.3       // A: stronger environment highlight (D)
+    envMapIntensity: 1.2       // подсветка от HDR окружения
   });
 }
 
@@ -351,10 +363,13 @@ function makeCardGroup(url){
   sharp.renderOrder = 0;
   g.add(sharp);
 
-  // 2) BLUR: narrow halo around edges (C) with same rounded mask
+  // 2) BLUR: overlay the blurred version of the image over the edges.
   const blurAlpha = multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024);
-  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.40);
+  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.60);
   blurMat.depthWrite = false;
+  // цвет размытия и стекла выбирается из пастельных оттенков
+  const tint = TINT_COLORS[Math.floor(Math.random()*TINT_COLORS.length)].clone();
+  blurMat.color.copy(tint);
   const blur = new THREE.Mesh(planeGeo, blurMat);
   blur.position.z = +0.0006;
   blur.renderOrder = 1;
@@ -364,6 +379,8 @@ function makeCardGroup(url){
   const glass = new THREE.Mesh(planeGeo, makeGlassMaterial());
   glass.position.z = +0.0016;
   glass.renderOrder = 2;
+  // тонируем стекло тем же оттенком, слегка смешивая его с белым для светлого вида
+  glass.material.color.copy(tint).lerp(new THREE.Color(0xffffff), 0.4);
   g.add(glass);
 
   // 4) FRESNEL EDGE: additive glow along edges (D)
