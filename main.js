@@ -1,8 +1,6 @@
-// main.js — стекло с тонким светлым кантoм, скруглённые углы,
-// узкий кромочный blur, блики (clearcoat+env), без transmission «мыла».
-// Поведение камеры/поезда и расположение карточек НЕ изменены.
+// main.js (classic script, THREE is global)
 
-//// ===== БАЗОВЫЕ КОНСТАНТЫ (как у тебя) =====
+// ========= КОНСТАНТЫ И ПАРАМЕТРЫ (как в рабочей версии) =========
 const BASE = new THREE.Vector3( 3.945000,  2.867638, -44.981224 );
 const STEP = new THREE.Vector3(-0.375000, -0.272589,   0.715546 );
 const ROT  = new THREE.Quaternion(0.174819586, -0.254544801, -0.046842770, 0.949974111);
@@ -24,7 +22,7 @@ const BASE_Z_PULL = +8.0;
 const WRAP_SPAN   = 3;
 const EPS_Z       = 0.0008;
 
-//// ===== СЦЕНА/РЕНДЕР (как было; + тономаппинг по п. G) =====
+// ========= СЦЕНА/РЕНДЕР =========
 const root = document.getElementById('app') || document.body;
 
 const renderer = new THREE.WebGLRenderer({
@@ -35,8 +33,6 @@ const renderer = new THREE.WebGLRenderer({
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.setPixelRatio(window.devicePixelRatio || 1);
 renderer.setClearColor(0xf3f3f3, 1);
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.10; // мягче блики стекла
 root.appendChild(renderer.domElement);
 
 const scene  = new THREE.Scene();
@@ -54,16 +50,23 @@ function resize(){
 window.addEventListener('resize', resize);
 resize();
 
-//// ===== ENV (для бликов стекла) =====
+// ========= ДАННЫЕ =========
+fetch('./cards.json')
+  .then(r => r.json())
+  .then(json => init(Array.isArray(json.cards) ? json.cards : []))
+  .catch(()=> init([]));
+
+// ========= ENV: HDR studio.hdr =========
 let ENV_READY = false;
 
 function ensureRGBELoader() {
   return new Promise((resolve) => {
     if (THREE.RGBELoader) return resolve();
     const s = document.createElement('script');
+    // UMD-версия загрузчика
     s.src = 'https://unpkg.com/three@0.160.0/examples/js/loaders/RGBELoader.js';
     s.onload = () => resolve();
-    s.onerror = () => resolve();
+    s.onerror = () => resolve(); // просто работаем без env, если не загрузилось
     document.head.appendChild(s);
   });
 }
@@ -81,20 +84,42 @@ function loadEnvironment() {
       .load('studio.hdr', (hdr) => {
         const envTex = pmrem.fromEquirectangular(hdr).texture;
         hdr.dispose(); pmrem.dispose();
-        scene.environment = envTex;
+        scene.environment = envTex; // физические материалы возьмут это автоматически
         ENV_READY = true;
         resolve(envTex);
       }, undefined, () => resolve(null));
   });
 }
 
-//// ===== ГЕОМ/ЛОАДЕРЫ =====
+// ========= ФАБРИКА КАРТОЧКИ (sharp + blur + glass) =========
 const planeGeo = new THREE.PlaneGeometry(1, 1);
 const texLoader = new THREE.TextureLoader();
 
 function deriveBlurURL(url){
   const m = url && url.match(/^(.*)(\.[a-zA-Z0-9]+)$/);
   return m ? `${m[1]}_blur${m[2]}` : `${url}_blur`;
+}
+
+function makeGlassMaterial() {
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    metalness: 0.0,
+    roughness: 0.0,     // чтобы не давать micro-blur
+    transmission: 0.0,  // убираем экранное размытие
+    thickness: 0.0,
+    ior: 1.0,
+    transparent: true,
+    opacity: 0.08,      // была проблема: 0.85 сильно темнит; 0.05–0.12 — норм
+    depthWrite: false
+  });
+  mat.envMapIntensity = 1.0; // блик/объём от HDR остаются
+  return mat;
+}
+
+
+function makeSharpMaterial(tex) {
+  const m = new THREE.MeshBasicMaterial({ map: tex, depthTest: true, depthWrite: true });
+  return m;
 }
 
 function loadTexture(url, onLoad, onError){
@@ -106,284 +131,56 @@ function loadTexture(url, onLoad, onError){
   }, undefined, ()=> onError && onError());
 }
 
-//// ===== МАСКИ: скругление, кромка для blur и для стекла =====
-
-// Скруглённый прямоугольник (alpha: 1 внутри, 0 снаружи)
-function makeRoundedMask(size = 1024, radiusNorm = 0.04){
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-  const r = radiusNorm * size;
-  x.clearRect(0,0,size,size);
-  x.fillStyle = '#fff';
-  x.beginPath();
-  x.moveTo(r,0);
-  x.lineTo(size-r,0); x.quadraticCurveTo(size,0,size,r);
-  x.lineTo(size,size-r); x.quadraticCurveTo(size,size,size-r,size);
-  x.lineTo(r,size); x.quadraticCurveTo(0,size,0,size-r);
-  x.lineTo(0,r); x.quadraticCurveTo(0,0,r,0);
-  x.closePath(); x.fill();
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.NoColorSpace;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = true;
-  return t;
-}
-
-// Кромка для blur-оверлея: 1 на краях, 0 в центре (узкий ореол)
-function makeEdgeMask(size = 1024, edge = 0.11, feather = 0.09){
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-  const img = x.createImageData(size, size);
-  const data = img.data;
-  const smooth = (a,b,t)=>{
-    t = Math.min(1,Math.max(0,(t-a)/(b-a)));
-    return t*t*(3-2*t);
-  };
-  for(let j=0;j<size;j++){
-    const v = (j+0.5)/size;
-    for(let i=0;i<size;i++){
-      const u = (i+0.5)/size;
-      const d = Math.min(u,v,1-u,1-v);
-      const m = 1 - smooth(edge, edge+feather, d); // 1-кромка
-      const g = (m*255)|0;
-      const k = (j*size+i)*4;
-      data[k]=g; data[k+1]=g; data[k+2]=g; data[k+3]=255;
-    }
-  }
-  x.putImageData(img,0,0);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.NoColorSpace;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = true;
-  return t;
-}
-
-// Градиентная маска для стекла (A): центр 1 → кромка 0 (тонкий светлый кант)
-function makeGlassAlphaMask(size = 1024, edge = 0.17, feather = 0.11){
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-  const img = x.createImageData(size, size);
-  const data = img.data;
-  const smooth = (a,b,t)=>{
-    t = Math.min(1,Math.max(0,(t-a)/(b-a)));
-    return t*t*(3-2*t);
-  };
-  for(let j=0;j<size;j++){
-    const v = (j+0.5)/size;
-    for(let i=0;i<size;i++){
-      const u = (i+0.5)/size;
-      const d = Math.min(u,v,1-u,1-v);
-      const a = 1 - smooth(edge, edge+feather, d); // центр 1, край 0
-      const g = (a*255)|0;
-      const k = (j*size+i)*4;
-      data[k]=g; data[k+1]=g; data[k+2]=g; data[k+3]=255;
-    }
-  }
-  x.putImageData(img,0,0);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.NoColorSpace;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = true;
-  return t;
-}
-
-// Комбинируем две маски (умножение) в CanvasTexture
-function multiplyAlphaMaps(aTex, bTex, size=1024){
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const x = c.getContext('2d');
-
-  // нарисуем a в канву
-  const ca = document.createElement('canvas'); ca.width=ca.height=size;
-  const xa = ca.getContext('2d'); xa.drawImage(aTex.image,0,0,size,size);
-  // b
-  const cb = document.createElement('canvas'); cb.width=cb.height=size;
-  const xb = cb.getContext('2d'); xb.drawImage(bTex.image,0,0,size,size);
-
-  const ia = xa.getImageData(0,0,size,size).data;
-  const ib = xb.getImageData(0,0,size,size).data;
-  const out = x.createImageData(size,size); const d=out.data;
-
-  for(let i=0;i<d.length;i+=4){
-    const ga = ia[i+1]/255, gb = ib[i+1]/255; // используем .g канал
-    const g = Math.max(0, Math.min(1, ga*gb));
-    d[i]=d[i+1]=d[i+2]=(g*255)|0; d[i+3]=255;
-  }
-  x.putImageData(out,0,0);
-
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.NoColorSpace;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = true;
-  return t;
-}
-
-const ROUNDED_MASK   = makeRoundedMask(1024, 0.04);     // (E)
-const EDGE_MASK      = makeEdgeMask(1024, 0.11, 0.09);  // (C)
-const GLASS_MASK_RAW = makeGlassAlphaMask(1024, 0.17, 0.11); // (A)
-const GLASS_MASK     = multiplyAlphaMaps(GLASS_MASK_RAW, ROUNDED_MASK, 1024); // стекло с учётом скругления
-
-//// ===== МАТЕРИАЛЫ =====
-
-// Стекло: без transmission, с бликами, тонкий кант по краю
-function makeGlassMaterial() {
-  return new THREE.MeshPhysicalMaterial({
-    color: 0xffffff,
-    metalness: 0.0,
-    roughness: 0.05,            // A
-    clearcoat: 1.0,             // D
-    clearcoatRoughness: 0.03,   // D
-    transmission: 0.0,          // A — никакого screen blur
-    thickness: 0.0,
-    ior: 1.0,
-    transparent: true,
-    opacity: 0.12,              // A — центральная «дымка»
-    alphaMap: GLASS_MASK,       // A+E — узкий светлый кант, скруглённые углы
-    depthWrite: false,
-    envMapIntensity: 1.3        // A,D — читаемые блики
-  });
-}
-
-// Fresnel-подсветка кромки (D): аддитивный, тонкий ореол по краям
-function makeFresnelEdgeMaterial(){
-  const mat = new THREE.ShaderMaterial({
-    uniforms: {
-      uIntensity: { value: 0.15 }, // яркость на самом краю
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main(){
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
-      }
-    `,
-    fragmentShader: `
-      varying vec2 vUv;
-      uniform float uIntensity;
-      // расстояние до ближайшей кромки в UV (0 в центре, 0.5 на краю прямоугольника)
-      float edgeDist(vec2 uv){
-        float d = min(min(uv.x, uv.y), min(1.0-uv.x, 1.0-uv.y));
-        return d;
-      }
-      void main(){
-        float d = edgeDist(vUv);
-        // узкий ореол по краю: от 0.0..0.2 (подберите если надо)
-        float glow = smoothstep(0.12, 0.0, d); // 1 у самой кромки → 0 к центру
-        // мягкий спад
-        glow *= 0.85;
-        vec3 col = vec3(1.0);
-        gl_FragColor = vec4(col, glow * uIntensity);
-      }
-    `,
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    depthTest: true
-  });
-  return mat;
-}
-
-// Материал для sharp/blur с поддержкой alphaMap (rounded)
-function makeBasicWithAlpha(tex, alphaTex, opacity=1){
-  const m = new THREE.MeshBasicMaterial({
-    map: tex || null,
-    transparent: true,
-    opacity,
-    alphaMap: alphaTex || null,
-    depthTest: true,
-    depthWrite: true
-  });
-  return m;
-}
-
-//// ===== АВТО-ГЕНЕРАЦИЯ BLUR (C) =====
-async function makeAutoBlurFromTexture(srcTex, radiusPx=16){
-  const img = srcTex.image;
-  if (!img) return null;
-  const w = img.width, h = img.height;
-  const c = document.createElement('canvas'); c.width=w; c.height=h;
-  const x = c.getContext('2d');
-  x.filter = `blur(${radiusPx}px)`;
-  x.drawImage(img, 0, 0, w, h);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.minFilter = THREE.LinearMipmapLinearFilter;
-  t.magFilter = THREE.LinearFilter;
-  t.generateMipmaps = true;
-  return t;
-}
-
-//// ===== КАРТОЧКА (B, C, D, E, F) =====
 function makeCardGroup(url){
+  // root-группа, чтобы перемещать как один объект (позиции остаются прежними)
   const g = new THREE.Group();
   g.quaternion.copy(ROT);
 
-  // 1) SHARP — слегка меньше (рамка по периметру)
-  const sharpMat = makeBasicWithAlpha(null, ROUNDED_MASK, 1.0);
-  const sharp = new THREE.Mesh(planeGeo, sharpMat);
-  sharp.position.z = 0.0;
-  sharp.scale.set(0.96, 0.96, 1.0); // B — рамка
-  sharp.renderOrder = 0;
-  g.add(sharp);
+  // задний слой (blur)
+  const blurMat = new THREE.MeshBasicMaterial({ depthTest: true, depthWrite: true });
+  const blurMesh = new THREE.Mesh(planeGeo, blurMat);
+  blurMesh.position.z = -0.003; // чуть дальше от камеры
+  g.add(blurMesh);
 
-  // 2) BLUR-OVERLAY — узкий ореол по кромке, поверх sharp
-  const blurMat = makeBasicWithAlpha(null, multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024), 0.40); // C
-  blurMat.depthWrite = false; // F
-  const blur = new THREE.Mesh(planeGeo, blurMat);
-  blur.position.z = +0.0006; // F
-  blur.renderOrder = 1;
-  g.add(blur);
+  // средний слой (sharp)
+  const sharpMat = new THREE.MeshBasicMaterial({ depthTest: true, depthWrite: true });
+  const sharpMesh = new THREE.Mesh(planeGeo, sharpMat);
+  // ровно в ноль
+  g.add(sharpMesh);
 
-  // 3) GLASS — фронт (градиент к краям + блики)
-  const glass = new THREE.Mesh(planeGeo, makeGlassMaterial());
-  glass.position.z = +0.0016; // F
-  glass.renderOrder = 2;
-  g.add(glass);
+  // фронт-стекло
+  const glassMat = makeGlassMaterial();
+  const glassMesh = new THREE.Mesh(planeGeo, glassMat);
+  glassMesh.position.z = +0.0015; // чуть ближе к камере
+  g.add(glassMesh);
 
-  // 4) FRESNEL EDGE — аддитивная подсветка кромки (еле заметно)
-  const fresnel = new THREE.Mesh(planeGeo, makeFresnelEdgeMaterial());
-  fresnel.position.z = +0.0017;
-  fresnel.renderOrder = 3;
-  g.add(fresnel);
-
-  // ===== ТЕКСТУРЫ =====
-  loadTexture(url, async (tex)=>{
+  // загрузка текстур
+  loadTexture(url, (tex)=>{
     sharpMat.map = tex; sharpMat.needsUpdate = true;
-
-    // масштаб всей группы по исходной текстуре
+    // масштаб всей группы — по исходной текстуре (сохраняем прежнюю геометрию)
     const w = tex.image?.width || 1, h = tex.image?.height || 1;
     g.scale.set((w/h)||1, 1, 1);
+  });
 
-    // blur-оверлей: пробуем _blur, иначе автогенерация
-    const blurURL = deriveBlurURL(url);
-    loadTexture(blurURL, (btex)=>{
-      blurMat.map = btex; blurMat.needsUpdate = true;
-      blur.visible = true;
-    }, async ()=>{
-      const auto = await makeAutoBlurFromTexture(tex, 16);
-      if (auto){
-        blurMat.map = auto; blurMat.needsUpdate = true;
-        blur.visible = true;
-      }else{
-        blur.visible = false;
-      }
-    });
+  const blurURL = deriveBlurURL(url);
+  loadTexture(blurURL, (tex)=>{
+    // мягкий внешний вид
+    tex.minFilter = THREE.LinearMipMapLinearFilter;
+    blurMat.map = tex; blurMat.needsUpdate = true;
+  }, ()=>{
+    // файла нет — просто скрываем слой
+    blurMesh.visible = false;
   });
 
   return g;
 }
 
-//// ===== ИНИЦИАЛИЗАЦИЯ/ПОЕЗД (НЕ ТРОГАЛ) =====
+// ========= ОСНОВНАЯ ИНИЦИАЛИЗАЦИЯ =========
 function init(cards){
-  loadEnvironment(); // блики
+  // env грузим в фоне (материалы его подхватят автоматически)
+  loadEnvironment();
 
+  // подготовка «поезда» (геометрия расположения ровно как в твоей рабочей версии)
   const dir     = STEP.clone().normalize();
   const stepLen = STEP.length();
 
@@ -396,7 +193,8 @@ function init(cards){
   const train = new THREE.Group();
   scene.add(train);
 
-  const items = [];
+  const items = []; // {mesh(root group), s0, perp, epsAlong}
+
   const tmp  = new THREE.Vector3();
   const tmp2 = new THREE.Vector3();
 
@@ -404,6 +202,7 @@ function init(cards){
     const url = cards[i]?.src;
     const meshRoot = makeCardGroup(url);
 
+    // стартовая позиция/раскладка — идентична базовой логике
     const basePos  = tmp.copy(baseNudged).addScaledVector(STEP, i);
     const fromBase = tmp2.copy(basePos).sub(baseNudged);
     const s0       = fromBase.dot(dir);
@@ -411,11 +210,13 @@ function init(cards){
     const epsAlong = -EPS_Z * i;
 
     meshRoot.position.copy(baseNudged).add(perp).addScaledVector(dir, s0 + epsAlong);
+
+    meshRoot.renderOrder = i;
     train.add(meshRoot);
     items.push({ mesh: meshRoot, s0, perp, epsAlong });
   }
 
-  // цикличность
+  // параметры цикличности — как в рабочей версии
   const sValues = items.map(it => it.s0).sort((a,b)=>a-b);
   const firstS  = sValues.length ? sValues[0] : 0;
   const wrapLen = stepLen * Math.max(1, items.length);
@@ -423,6 +224,7 @@ function init(cards){
   const sTotal  = wrapLen * WRAP_SPAN;
   const mod     = (a, n) => ((a % n) + n) % n;
 
+  // ввод/инерция/зуум — как в рабочей версии
   let offset = 0;
   let v = 0;
 
@@ -486,7 +288,7 @@ function init(cards){
       camera.updateProjectionMatrix();
     }
 
-    const sShift = offset * STEP.length();
+    const sShift = offset * stepLen;
 
     for (let i = 0; i < items.length; i++){
       const it = items[i];
@@ -495,21 +297,16 @@ function init(cards){
       const along = sWrapped + it.epsAlong;
 
       it.mesh.position
+        .copy(BASE) // сразу перезапишем правильной формулой ниже (для ясности — без BASE)
         .copy(new THREE.Vector3(
           BASE.x + RIGHT_NUDGE,
           BASE.y + DOWN_NUDGE,
           BASE.z + BASE_Z_PULL
         ))
         .add(it.perp)
-        .addScaledVector(STEP.clone().normalize(), along);
+        .addScaledVector(dir, along);
     }
 
     renderer.render(scene, camera);
   });
 }
-
-//// ===== ДАННЫЕ =====
-fetch('./cards.json')
-  .then(r => r.json())
-  .then(json => init(Array.isArray(json.cards) ? json.cards : []))
-  .catch(()=> init([]));
