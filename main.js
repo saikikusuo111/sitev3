@@ -105,16 +105,11 @@ function loadEnvironment() {
 const planeGeo  = new THREE.PlaneGeometry(1, 1);
 const texLoader = new THREE.TextureLoader();
 
-// Пастельные оттенки для тонировки стекла и размытия.
-// Цвет выбирается случайно для каждой карточки, придавая футуристичный
-// вид и разнообразие. Можно добавить больше оттенков при желании.
-const TINT_COLORS = [
-  new THREE.Color(0xfff9d0), // нежный жёлтый
-  new THREE.Color(0xd0f4ff), // нежный голубой
-  new THREE.Color(0xf0d0ff), // нежный фиолетовый
-  new THREE.Color(0xdff0ff), // светло‑голубой
-  new THREE.Color(0xffe0f0)  // светло‑розовый
-];
+// Пастельные оттенки больше не используются, чтобы карточки не
+// желтили/розовели. Мы оставляем натуральные цвета изображений, а
+// размытие и стекло подсвечиваем белым оттенком. Тонировка была
+// исключена по просьбе пользователя.
+
 
 function deriveBlurURL(url){
   const m = url && url.match(/^(.*)(\.[a-zA-Z0-9]+)$/);
@@ -365,11 +360,12 @@ function makeCardGroup(url){
 
   // 2) BLUR: overlay the blurred version of the image over the edges.
   const blurAlpha = multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024);
-  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.60);
+  // Для размытия используем белый цвет с умеренной прозрачностью. Это
+  // позволяет центральному изображению оставаться насыщенным, а края —
+  // плавно растворяться в фоне, как на оригинальном сайте.
+  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.40);
   blurMat.depthWrite = false;
-  // цвет размытия и стекла выбирается из пастельных оттенков
-  const tint = TINT_COLORS[Math.floor(Math.random()*TINT_COLORS.length)].clone();
-  blurMat.color.copy(tint);
+  blurMat.color.set(0xffffff);
   const blur = new THREE.Mesh(planeGeo, blurMat);
   blur.position.z = +0.0006;
   blur.renderOrder = 1;
@@ -379,8 +375,9 @@ function makeCardGroup(url){
   const glass = new THREE.Mesh(planeGeo, makeGlassMaterial());
   glass.position.z = +0.0016;
   glass.renderOrder = 2;
-  // тонируем стекло тем же оттенком, слегка смешивая его с белым для светлого вида
-  glass.material.color.copy(tint).lerp(new THREE.Color(0xffffff), 0.4);
+  // Стекло оставляем белого цвета. Это обеспечивает натуральный вид
+  // изображения и аккуратный световой ободок.
+  glass.material.color.set(0xffffff);
   g.add(glass);
 
   // 4) FRESNEL EDGE: additive glow along edges (D)
