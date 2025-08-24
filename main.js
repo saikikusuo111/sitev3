@@ -2,8 +2,19 @@
 // блики (clearcoat+env), без transmission «мыла». Камера/поезд/геометрия не тронуты.
 
 //// ===== БАЗОВЫЕ КОНСТАНТЫ =====
-const BASE = new THREE.Vector3( 3.945000,  2.867638, -44.981224 );
-const STEP = new THREE.Vector3(-0.375000, -0.272589,   0.715546 );
+// Базовая точка, от которой начинается поезд карточек. Изначально в оригинале
+// положительные координаты X/Y направляли движение вниз‑влево и ближе к камере.
+// Для воссоздания визуала Unveil положим базу зеркально: по X и Y значения
+// инвертированы, чтобы поезд уходил вверх‑вправо, а по Z оставляем
+// исходное значение (глубина сцены).  
+const BASE = new THREE.Vector3(-3.945000, -2.867638, -44.981224);
+// Шаг между карточками. Знаки X/Y инвертированы, а Z сделан отрицательным,
+// чтобы каждая следующая карточка уходила в глубину, создавая эффект
+// перспективы как на сайте unveil.fr.
+const STEP = new THREE.Vector3(0.375000, 0.272589, -0.715546);
+// Поворот карточек оставляем без изменений: они смотрят прямо на камеру
+// (нет вращения вокруг оси Y), небольшие наклоны используются для
+// имитации перспективы.  
 const ROT  = new THREE.Quaternion(0.174819586, -0.254544801, -0.046842770, 0.949974111);
 
 const NEAR = 0.1, FAR = 1000;
@@ -14,12 +25,15 @@ const V_TAU      = 0.18;
 const ZOOM_T_ON  = 0.10;
 const ZOOM_T_OFF = 0.16;
 
+// Параметры чувствительности к прокрутке/перетаскиванию
 const WHEEL_SENS = 0.0020;
 const DRAG_SENS  = 0.0100;
 
+// Небольшие подстройки базовой позиции по X/Y и глобальное смещение по Z
 const RIGHT_NUDGE = 0.0;
 const DOWN_NUDGE  = 0.0;
 const BASE_Z_PULL = +8.0;
+// Количество повторов «поезда» для бесконечной прокрутки
 const WRAP_SPAN   = 3;
 const EPS_Z       = 0.0008;
 
@@ -105,8 +119,10 @@ function loadTexture(url, onLoad, onError){
 }
 
 //// ===== MASK GENERATORS =====
-// Rounded rectangle mask (E) with radiusNorm fraction of side
-function makeRoundedMask(size = 1024, radiusNorm = 0.04){
+// Rounded rectangle mask (E) with radiusNorm fraction of side.  
+// Уменьшили радиус скругления с 0.04 до 0.02, чтобы углы были
+// едва заметно скруглены — как на Unveil.
+function makeRoundedMask(size = 1024, radiusNorm = 0.02){
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const ctx = c.getContext('2d');
@@ -128,8 +144,10 @@ function makeRoundedMask(size = 1024, radiusNorm = 0.04){
   return tex;
 }
 
-// Edge mask for blur (C): 1 at edges, 0 in centre
-function makeEdgeMask(size = 1024, edge = 0.11, feather = 0.09){
+// Edge mask for blur (C): 1 at edges, 0 in centre.  
+// Параметры edge и feather уменьшены, чтобы кромочный blur был тонким и
+// аккуратным — ближе к стилю Unveil.
+function makeEdgeMask(size = 1024, edge = 0.03, feather = 0.05){
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const ctx = c.getContext('2d');
@@ -159,8 +177,9 @@ function makeEdgeMask(size = 1024, edge = 0.11, feather = 0.09){
   return tex;
 }
 
-// Glass alpha mask (A): centre=1 → edges=0 (thin light rim)
-function makeGlassAlphaMask(size = 1024, edge = 0.17, feather = 0.11){
+// Glass alpha mask (A): centre=1 → edges=0 (thin light rim).  
+// Edge и feather уменьшены для более тонкого светлого ободка.
+function makeGlassAlphaMask(size = 1024, edge = 0.14, feather = 0.08){
   const c = document.createElement('canvas');
   c.width = c.height = size;
   const ctx = c.getContext('2d');
@@ -220,9 +239,10 @@ function multiplyAlphaMaps(aTex, bTex, size=1024){
 }
 
 // Precompute masks once
-const ROUNDED_MASK   = makeRoundedMask(1024, 0.04);      // (E)
-const EDGE_MASK      = makeEdgeMask(1024, 0.11, 0.09);   // (C)
-const GLASS_MASK_RAW = makeGlassAlphaMask(1024, 0.17, 0.11); // (A)
+// Используем обновлённые значения radius/edge/feather
+const ROUNDED_MASK   = makeRoundedMask(1024, 0.02);       // (E)
+const EDGE_MASK      = makeEdgeMask(1024, 0.03, 0.05);    // (C)
+const GLASS_MASK_RAW = makeGlassAlphaMask(1024, 0.14, 0.08); // (A)
 const GLASS_MASK     = multiplyAlphaMaps(GLASS_MASK_RAW, ROUNDED_MASK, 1024); // combined mask for glass
 const EDGE_ROUNDED   = multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024); // for blur overlay
 
@@ -317,26 +337,27 @@ function makeCardGroup(url){
   const g = new THREE.Group();
   g.quaternion.copy(ROT);
 
-  // 1) SHARP: scaled down (B) and rounded (E)
+  // 1) SHARP: scaled down (B) and rounded (E).  
+  // Масштаб увеличен до 0.98, чтобы рамка была очень тонкой, как у Unveil.
   const sharpMat = makeBasicWithAlpha(null, ROUNDED_MASK, 1.0);
   const sharp = new THREE.Mesh(planeGeo, sharpMat);
   sharp.position.z = 0.0;
-  sharp.scale.set(0.96, 0.96, 1.0); // B: slight inset to reveal rim
+  sharp.scale.set(0.98, 0.98, 1.0);
   sharp.renderOrder = 0;
   g.add(sharp);
 
   // 2) BLUR: narrow halo around edges (C) with same rounded mask
   const blurAlpha = multiplyAlphaMaps(ROUNDED_MASK, EDGE_MASK, 1024);
-  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.40); // C: opacity ~0.40
-  blurMat.depthWrite = false; // F
+  const blurMat = makeBasicWithAlpha(null, blurAlpha, 0.40);
+  blurMat.depthWrite = false;
   const blur = new THREE.Mesh(planeGeo, blurMat);
-  blur.position.z = +0.0006; // F: above sharp
+  blur.position.z = +0.0006;
   blur.renderOrder = 1;
   g.add(blur);
 
   // 3) GLASS: front panel with thin bright rim and clearcoat highlights (A,D,E)
   const glass = new THREE.Mesh(planeGeo, makeGlassMaterial());
-  glass.position.z = +0.0016; // F
+  glass.position.z = +0.0016;
   glass.renderOrder = 2;
   g.add(glass);
 
@@ -502,4 +523,4 @@ function init(cards){
 fetch('./cards.json')
   .then(r => r.json())
   .then(json => init(Array.isArray(json.cards) ? json.cards : []))
-  .catch(()=> init([]));
+  .catch(() => init([]));
